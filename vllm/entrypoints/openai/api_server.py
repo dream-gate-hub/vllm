@@ -129,6 +129,17 @@ async def show_version():
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
+    print(raw_request)
+
+    if request.max_tokens is None:
+        request.max_tokens_temp = 60
+    else:
+        request.max_tokens_temp = request.max_tokens
+        
+    request.max_tokens = 500
+
+    request.model = "/root/autodl-tmp/Llama-3-Lumimaid-8B-v0.1"
+
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
     if isinstance(generator, ErrorResponse):

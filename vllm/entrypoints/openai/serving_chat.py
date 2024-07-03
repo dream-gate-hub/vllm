@@ -1,5 +1,7 @@
 import codecs
 import time
+import re
+import random
 from dataclasses import dataclass, field
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
                     List, Optional)
@@ -491,51 +493,174 @@ class OpenAIServingChat(OpenAIServing):
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
 
+        print("n:{}\npresence_penalty:{}\nfrequency_penalty:{}\nrepetition_penalty:{}\ntemperature:{}\ntop_p:{}\nmin_p:{}\nstop:{}\nstop_token_ids:{}\nmax_tokens:{}\nbest_of:{}\ntop_k:{}\nignore_eos:{}\nuse_beam_search:{}\nskip_special_tokens:{}\nspaces_between_special_tokens:{}\n".format(request.n, request.presence_penalty, request.frequency_penalty, request.repetition_penalty, request.temperature, request.top_p, request.min_p, request.stop, request.stop_token_ids, request.max_tokens, request.best_of, request.top_k, request.ignore_eos, request.use_beam_search, request.skip_special_tokens, request.spaces_between_special_tokens))
+        
         async for res in result_generator:
-            if raw_request is not None and await raw_request.is_disconnected():
+            if await raw_request.is_disconnected():
                 # Abort the request if the client disconnects.
                 await self.engine.abort(request_id)
                 return self.create_error_response("Client disconnected")
             final_res = res
+            
+            # 超出max_tokens主动截止在终止符
+            for output in final_res.outputs:
+                if len(output.token_ids) > request.max_tokens_temp:    
+                    endings = ('\n', '!', '.', '?', '~', ')', '*')
+
+                    if output.text.endswith(endings):
+                        await self.engine.abort(request_id)
+        
         assert final_res is not None
-
-        choices: List[ChatCompletionResponseChoice] = []
-
+        
+        output.text = output.text.strip()
+        print(f"原文:\n{output.text}")
+        
+        choices = []
+        outputs = []
+        
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
-            token_ids = output.token_ids
-            out_logprobs = output.logprobs
+            print(f"\nmax tokens: {request.max_tokens_temp}")
+            print(f"prompt tokens: {len(final_res.prompt_token_ids)}")
+            print(f"output tokens: {len(output.token_ids)}")
 
-            if request.logprobs and request.top_logprobs is not None:
-                assert out_logprobs is not None, "Did not output logprobs"
-                logprobs = self._create_chat_logprobs(
-                    token_ids=token_ids,
-                    top_logprobs=out_logprobs,
-                    num_output_top_logprobs=request.top_logprobs,
-                )
+            rate = len(output.text.split(" ")) / len(output.token_ids)
+            print(f"words:tokens={rate}")
+
+            #************ 去除末尾不完整内容  *************
+            endIndex = -1
+            
+            for (i, char) in enumerate(output.text[::-1]):
+                if (char == ".") or (char == "!") or (char == "?") or (char == "~") or (char == ")"):# or (char == "*"):
+                    endIndex = len(output.text) - i
+                    break
+            
+            
+            if endIndex == -1:
+                # 没有终止符并且句子太短
+                if len(output.text) <= 10:
+                    output.text = ""
             else:
-                logprobs = None
+                # 有终止符，在之后的内容要截断
+                message = output.text[:endIndex]
+                outContent = output.text[endIndex:]
 
-            if request.tool_choice and type(
-                    request.tool_choice) is ChatCompletionNamedToolChoiceParam:
-                message = ChatMessage(
-                    role=role,
-                    content="",
-                    tool_calls=[
-                        ToolCall(function=FunctionCall(
-                            name=request.tool_choice.function.name,
-                            arguments=output.text))
-                    ])
-            elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, content=output.text)
+                """
+                eofColon = ''
+                eofColonIndex = message.rfind('"')
+
+                if len(message) > (eofColonIndex+1) and (eofColonIndex != -1):
+                    if re.search("[a-zA-Z]", message[eofColonIndex+1]): 
+                        eofColon = '"'
+
+                eofAsterisk = ''
+                eofAsteriskIndex = message.rfind('*')
+
+                if len(message) > (eofAsteriskIndex+1) and (eofAsteriskIndex != -1):
+                    if re.search("[a-zA-Z]", message[eofAsteriskIndex+1]): 
+                        eofAsterisk = '*'
+                """
+
+                output.text = message # + eofColon + eofAsterisk #显示被去除的内容 + "  >>>>>  " + outContent
+            #************ 去除末尾不完整内容 end   ***************
+
+            #************ fix markdown   ***************
+            def fix_markdown(text: str, for_display: bool) -> str:
+                def replace_spaces(match):
+                    # 去除格式字符周围的空格
+                    return match.group(1) + match.group(2).strip() + match.group(1)
+
+                # 匹配格式化标记及其包围的内容
+                format_pattern = re.compile(r'([*_]{1,2})(.*?)\1')
+                # 逆向替换，避免索引问题
+                matches = list(re.finditer(format_pattern, text))
+                for match in reversed(matches):
+                    start, end = match.span()
+                    text = text[:start] + replace_spaces(match) + text[end:]
+
+                if for_display:
+                    lines = text.split('\n')
+                    for i, line in enumerate(lines):
+                        # 修正未成对的格式字符和引号
+                        for char in ['*', '"']:
+                            if line.count(char) % 2 != 0:
+                                lines[i] = line.strip() + char
+                    text = '\n'.join(lines)
+
+                return text
+
+            markdown = fix_markdown(output.text, True)
+            if markdown != output.text:
+                print("尝试修复markdown")
+            output.text = markdown
+            #************ fix markdown end   ***************
+
+            print(f"\n截断和补全:\n{output.text}")
+
+            #************ 统计结尾词 **************
+
+            """
+            cleaned_string = re.sub(r"[^,、\s]", "", output.text)
+            if cleaned_string != cleaned_string.replace(","*15, "") or cleaned_string != cleaned_string.replace("、"*15, "") or cleaned_string != cleaned_string.replace(";"*15, "") or cleaned_string != cleaned_string.replace(" "*50, ""):
+                print("词穷了")
+                output.text = ""
+
+            eos_words = ["As decades roll by", "Years passed", "legend folklore", "End of Story", "story by writing", "Years later", "decades"]
+            for eos_word in eos_words:
+                if eos_word in output.text:
+                    output.text = ""
+                    print("匹配到eos词")
+                    print(eos_word)
+                    continue
+            """
+
+            print(f"\n最终:\n{output.text}")
+
+
+            def process_tts_text(text):
+                # 假设 skip_codeblocks 设置为 True
+                text = re.sub(r'^\s{4}.*$', '', text, flags=re.MULTILINE).strip()
+                text = re.sub(r'```.*?```', '', text, flags=re.DOTALL).strip()
+
+                # 假设 skip_tags 设置为 True
+                text = re.sub(r'<.*?>.*?</.*?>', '', text, flags=re.DOTALL).strip()
+
+                # 假设 pass_asterisks 设置为 False
+                text = re.sub(r'\*[^*]*?(\*|$)', '', text).strip()  # remove asterisks content
+
+                # 假设 narrate_quoted_only 设置为 True
+                text = re.sub(r'[“”«»]', '"', text)  # Normalize special quotes to standard quotes
+                matches = re.findall(r'"[^"]*"', text)  # Matches text inside double quotes, non-greedily
+                text = ' ... '.join(matches) if matches else text
+
+                # Replace fancy ellipsis with "..."
+                text = text.replace('…', '...')
+                # Remove quotes
+                text = text.replace('"', '').replace('“', '').replace('”', '').replace('‘', '').replace('’', '')
+                # Replace multiple "." with single "."
+                text = re.sub(r'\.+', '.', text)
+
+                # Collapse newlines and spaces into single space
+                text = re.sub(r'\s+', ' ', text).strip()
+
+                print(f'\nTTS: {text}')
+
+                return text
+            
+            #process_tts_text(output.text)
+            
+            if output.text == "":
+                continue
+            if output.text in outputs:
+                continue
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
-                message=message,
-                logprobs=logprobs,
+                message=ChatMessage(role=role, content=output.text),
                 finish_reason=output.finish_reason,
-                stop_reason=output.stop_reason)
+            )
             choices.append(choice_data)
+            outputs.append(output.text)
 
         if request.echo:
             last_msg_content = ""

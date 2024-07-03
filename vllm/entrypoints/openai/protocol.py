@@ -136,6 +136,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = 0
     max_tokens: Optional[int] = None
+    max_tokens_temp: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
