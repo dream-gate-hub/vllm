@@ -1,0 +1,1 @@
+/workspace/vllm_env/bin/python3 check_runpod.py
