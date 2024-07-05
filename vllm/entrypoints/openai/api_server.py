@@ -138,7 +138,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         
     request.max_tokens = 500
 
-    request.model = "/root/autodl-tmp/Llama-3-Lumimaid-8B-v0.1"
+    request.model = "/workspace/Llama-3-Lumimaid-8B-v0.1"
 
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)

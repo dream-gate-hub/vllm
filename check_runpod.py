@@ -24,7 +24,7 @@ if __name__ == "__main__":
 
     # 启动 start.sh 脚本
     subprocess.run(["sh", "start_runpod.sh"])
-    time.sleep(60)
+    time.sleep(120)
 
     api_url = "http://localhost:6006"  # 替换成您的API的地址
     flag = True
